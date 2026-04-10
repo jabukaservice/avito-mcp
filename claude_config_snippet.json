@@ -1,0 +1,20 @@
+{
+  "_comment": "Add this block to mcpServers in ~/Library/Application Support/Claude/claude_desktop_config.json",
+  "avito-mcp": {
+    "command": "python3",
+    "args": [
+      "/path/to/avito-mcp/avito_mcp.py"
+    ],
+    "env": {
+      "AVITO_CLIENT_ID": "your_client_id",
+      "AVITO_CLIENT_SECRET": "your_client_secret",
+      "AVITO_USER_ID": "your_user_id",
+      "AVITO_ACCOUNT_NAME": "main",
+      "AVITO_CLIENT_ID_2": "optional_second_client_id",
+      "AVITO_CLIENT_SECRET_2": "optional_second_client_secret",
+      "AVITO_USER_ID_2": "auto",
+      "AVITO_ACCOUNT_NAME_2": "second",
+      "AVITO_SSL_VERIFY": "false"
+    }
+  }
+}

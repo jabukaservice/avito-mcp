@@ -1,0 +1,281 @@
+{
+  "name": "Avito-Telegram Bridge",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Poll Every 2 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== КОНФИГУРАЦИЯ — ЗАПОЛНИ СВОИ ДАННЫЕ =====\nconst AVITO_CLIENT_ID = 'ВСТАВЬ_CLIENT_ID';\nconst AVITO_CLIENT_SECRET = 'ВСТАВЬ_CLIENT_SECRET';\nconst AVITO_USER_ID = 'ВСТАВЬ_USER_ID'; // Твой user_id в Avito\nconst TG_BOT_TOKEN = '7537534483:ВСТАВЬ_ТОКЕН_БОТА';\nconst TG_CHAT_ID = '25862920'; // Евгений\nconst AI_API_KEY = ''; // Claude API key (опционально)\n// ===============================================\n\nconst staticData = $getWorkflowStaticData('global');\nconst now = Date.now();\n\n// --- 1. Получить OAuth token ---\nif (!staticData.avito_token || !staticData.avito_token_expires || staticData.avito_token_expires < now + 300000) {\n  try {\n    const tokenResp = await $helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.avito.ru/token/',\n      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n      body: `grant_type=client_credentials&client_id=${AVITO_CLIENT_ID}&client_secret=${AVITO_CLIENT_SECRET}`,\n      returnFullResponse: false\n    });\n    staticData.avito_token = tokenResp.access_token;\n    staticData.avito_token_expires = now + ((tokenResp.expires_in || 86400) * 1000);\n  } catch (e) {\n    return [{ json: { error: 'Auth failed: ' + e.message, _stop: true } }];\n  }\n}\nconst token = staticData.avito_token;\n\n// --- 2. Получить непрочитанные чаты ---\nlet chats = [];\ntry {\n  const chatsResp = await $helpers.httpRequest({\n    method: 'GET',\n    url: `https://api.avito.ru/messenger/v2/accounts/${AVITO_USER_ID}/chats`,\n    headers: { 'Authorization': `Bearer ${token}` },\n    qs: { unread_only: true, limit: 20 }\n  });\n  chats = chatsResp.chats || chatsResp.result?.chats || [];\n} catch (e) {\n  return [{ json: { error: 'Get chats failed: ' + e.message, _stop: true } }];\n}\n\nif (!chats.length) {\n  return [{ json: { _stop: true, reason: 'no_unread' } }];\n}\n\n// --- 3. Фильтр уже обработанных ---\nif (!staticData.seen) staticData.seen = {};\n\n// Чистим старые записи (старше 24ч)\nconst cutoff = now - 86400000;\nfor (const key of Object.keys(staticData.seen)) {\n  if (staticData.seen[key] < cutoff) delete staticData.seen[key];\n}\n\nconst newMessages = [];\n\nfor (const chat of chats) {\n  const chatId = chat.id || chat.chat_id;\n  if (!chatId) continue;\n  \n  // Получить последние сообщения в чате\n  let messages = [];\n  try {\n    const msgResp = await $helpers.httpRequest({\n      method: 'GET',\n      url: `https://api.avito.ru/messenger/v3/accounts/${AVITO_USER_ID}/chats/${chatId}/messages/`,\n      headers: { 'Authorization': `Bearer ${token}` },\n      qs: { limit: 5 }\n    });\n    messages = msgResp.messages || msgResp.result?.messages || [];\n  } catch (e) {\n    continue; // Пропускаем чат при ошибке\n  }\n\n  // Найти новые входящие сообщения\n  for (const msg of messages) {\n    const msgId = String(msg.id || msg.message_id || '');\n    const authorId = String(msg.author_id || msg.user_id || '');\n    \n    // Пропускаем свои сообщения и уже обработанные\n    if (authorId === AVITO_USER_ID) continue;\n    if (msgId && staticData.seen[msgId]) continue;\n    \n    // Помечаем как обработанное\n    if (msgId) staticData.seen[msgId] = now;\n    \n    // Получить информацию о товаре\n    let itemInfo = { title: 'Неизвестный товар', price: '—', url: '' };\n    const itemId = chat.item_id || chat.context?.value?.item_id || '';\n    if (itemId) {\n      try {\n        const itemResp = await $helpers.httpRequest({\n          method: 'GET',\n          url: `https://api.avito.ru/core/v1/accounts/${AVITO_USER_ID}/items/${itemId}/`,\n          headers: { 'Authorization': `Bearer ${token}` }\n        });\n        itemInfo = {\n          title: itemResp.title || 'Товар',\n          price: itemResp.price ? `${itemResp.price} ₽` : '—',\n          url: itemResp.url || `https://www.avito.ru/${itemId}`\n        };\n      } catch (e) { /* оставляем дефолт */ }\n    }\n    \n    newMessages.push({\n      json: {\n        chat_id: chatId,\n        message_id: msgId,\n        buyer_name: chat.user?.name || msg.author_name || 'Покупатель',\n        message_text: msg.content?.text || msg.text || msg.body || '(без текста)',\n        item_title: itemInfo.title,\n        item_price: itemInfo.price,\n        item_url: itemInfo.url,\n        item_id: itemId,\n        avito_user_id: AVITO_USER_ID,\n        tg_bot_token: TG_BOT_TOKEN,\n        tg_chat_id: TG_CHAT_ID,\n        ai_api_key: AI_API_KEY,\n        _stop: false\n      }\n    });\n    \n    break; // Берём только последнее новое сообщение в чате\n  }\n}\n\nif (newMessages.length === 0) {\n  return [{ json: { _stop: true, reason: 'all_seen' } }];\n}\n\nreturn newMessages;"
+      },
+      "id": "fetch-avito",
+      "name": "Fetch Avito Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-stop",
+              "leftValue": "={{ $json._stop }}",
+              "rightValue": "={{ false }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-has-messages",
+      "name": "Has New Messages?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\n// Контекст для AI\nconst prompt = `Ты — менеджер сервисного центра Jabuka (ремонт Apple техники) на Avito.\nПокупатель написал сообщение по объявлению.\n\nОбъявление: ${item.item_title} — ${item.item_price}\nИмя покупателя: ${item.buyer_name}\nСообщение: ${item.message_text}\n\nНапиши короткий, дружелюбный ответ (1-3 предложения).\nЕсли спрашивают о наличии — подтверди что товар есть.\nЕсли спрашивают о состоянии — скажи что отличное, проверено.\nЕсли спрашивают о доставке — предложи самовывоз или курьера.\nЕсли спрашивают о скидке — скажи что цена финальная, но можно обсудить.\nНе используй смайлики. Будь кратким и конкретным.`;\n\nreturn [{\n  json: {\n    ...item,\n    ai_prompt: prompt\n  }\n}];"
+      },
+      "id": "build-prompt",
+      "name": "Build AI Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $json.ai_api_key }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 300,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.ai_prompt) }}\n    }\n  ]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "ai-draft",
+      "name": "Claude AI Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 200],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst prev = $node['Build AI Prompt'].json;\n\n// Извлекаем ответ AI\nlet draft = '(AI недоступен — ответьте вручную)';\ntry {\n  if (item.content && item.content[0] && item.content[0].text) {\n    draft = item.content[0].text;\n  } else if (item.error) {\n    draft = '(AI ошибка: ' + (item.error.message || 'unknown') + ')';\n  }\n} catch (e) {\n  draft = '(AI ошибка парсинга)';\n}\n\n// Формируем Telegram сообщение\nconst tgText = `📦 <b>Новое сообщение Avito</b>\\n\\n` +\n  `👤 <b>${prev.buyer_name}</b>\\n` +\n  `📋 ${prev.item_title} — ${prev.item_price}\\n\\n` +\n  `💬 <i>${prev.message_text}</i>\\n\\n` +\n  `───────────────\\n` +\n  `🤖 <b>Черновик ответа:</b>\\n${draft}\\n` +\n  `───────────────`;\n\n// Inline keyboard с кнопками\nconst keyboard = {\n  inline_keyboard: [\n    [\n      { text: '✅ Отправить черновик', callback_data: `avito:approve:${prev.chat_id}` },\n      { text: '✏️ Свой ответ', callback_data: `avito:custom:${prev.chat_id}` }\n    ],\n    [\n      { text: '🔗 Открыть в Avito', url: prev.item_url || 'https://avito.ru' }\n    ]\n  ]\n};\n\n// Сохраняем черновик в static data для approve\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.drafts) staticData.drafts = {};\nstaticData.drafts[prev.chat_id] = {\n  text: draft,\n  buyer: prev.buyer_name,\n  item: prev.item_title,\n  ts: Date.now()\n};\n\nreturn [{\n  json: {\n    tg_url: `https://api.telegram.org/bot${prev.tg_bot_token}/sendMessage`,\n    body: {\n      chat_id: prev.tg_chat_id,\n      text: tgText,\n      parse_mode: 'HTML',\n      reply_markup: keyboard\n    }\n  }\n}];"
+      },
+      "id": "format-tg",
+      "name": "Format TG Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.tg_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-tg",
+      "name": "Send to Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 200]
+    },
+
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "avito-reply",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-reply",
+      "name": "Avito Reply Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 620],
+      "webhookId": "avito-reply"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== КОНФИГУРАЦИЯ (дублируй сюда) =====\nconst AVITO_CLIENT_ID = 'ВСТАВЬ_CLIENT_ID';\nconst AVITO_CLIENT_SECRET = 'ВСТАВЬ_CLIENT_SECRET';\nconst AVITO_USER_ID = 'ВСТАВЬ_USER_ID';\nconst TG_BOT_TOKEN = '7537534483:ВСТАВЬ_ТОКЕН_БОТА';\n// ==========================================\n\nconst body = $input.first().json.body || $input.first().json;\n\n// Данные из callback: action, chat_id, text, tg_message_id, tg_chat_id\nconst action = body.action || 'approve'; // approve | custom | send_custom\nconst chatId = body.chat_id || body.avito_chat_id;\nconst customText = body.text || '';\nconst tgMessageId = body.tg_message_id || '';\nconst tgChatId = body.tg_chat_id || '25862920';\nconst callbackQueryId = body.callback_query_id || '';\n\nif (!chatId) {\n  return [{ json: { error: 'chat_id is required', _stop: true } }];\n}\n\n// Получить OAuth token\nconst staticData = $getWorkflowStaticData('global');\nconst now = Date.now();\n\nif (!staticData.avito_token || !staticData.avito_token_expires || staticData.avito_token_expires < now + 300000) {\n  const tokenResp = await $helpers.httpRequest({\n    method: 'POST',\n    url: 'https://api.avito.ru/token/',\n    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n    body: `grant_type=client_credentials&client_id=${AVITO_CLIENT_ID}&client_secret=${AVITO_CLIENT_SECRET}`\n  });\n  staticData.avito_token = tokenResp.access_token;\n  staticData.avito_token_expires = now + ((tokenResp.expires_in || 86400) * 1000);\n}\nconst token = staticData.avito_token;\n\n// Определить текст ответа\nlet replyText = customText;\nif (action === 'approve') {\n  // Берём сохранённый черновик\n  const drafts = staticData.drafts || {};\n  const draft = drafts[chatId];\n  if (draft && draft.text) {\n    replyText = draft.text;\n    delete drafts[chatId]; // Очищаем после использования\n  } else {\n    return [{ json: { error: 'Draft not found for chat ' + chatId, _stop: true } }];\n  }\n}\n\nif (!replyText) {\n  return [{ json: { error: 'No reply text', _stop: true } }];\n}\n\n// Отправить ответ в Avito\ntry {\n  await $helpers.httpRequest({\n    method: 'POST',\n    url: `https://api.avito.ru/messenger/v1/accounts/${AVITO_USER_ID}/chats/${chatId}/messages`,\n    headers: {\n      'Authorization': `Bearer ${token}`,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({\n      message: { text: replyText },\n      type: 'text'\n    })\n  });\n} catch (e) {\n  return [{ json: { error: 'Send to Avito failed: ' + e.message, _stop: true } }];\n}\n\n// Подтвердить в Telegram — ответить на callback_query и обновить сообщение\nif (callbackQueryId) {\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: `https://api.telegram.org/bot${TG_BOT_TOKEN}/answerCallbackQuery`,\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({\n        callback_query_id: callbackQueryId,\n        text: '✅ Ответ отправлен в Avito!'\n      })\n    });\n  } catch (e) { /* не критично */ }\n}\n\n// Отредактировать TG сообщение — добавить метку \"отправлено\"\nif (tgMessageId && tgChatId) {\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: `https://api.telegram.org/bot${TG_BOT_TOKEN}/editMessageReplyMarkup`,\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({\n        chat_id: tgChatId,\n        message_id: tgMessageId,\n        reply_markup: {\n          inline_keyboard: [\n            [{ text: '✅ Отправлено в Avito', callback_data: 'avito:done' }]\n          ]\n        }\n      })\n    });\n  } catch (e) { /* не критично */ }\n}\n\nreturn [{\n  json: {\n    success: true,\n    action: action,\n    chat_id: chatId,\n    reply_text: replyText,\n    _stop: false\n  }\n}];"
+      },
+      "id": "process-reply",
+      "name": "Process Reply & Send to Avito",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 620]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: !$json._stop, error: $json.error || null, action: $json.action || null }) }}",
+        "options": {
+          "responseCode": "={{ $json._stop ? 400 : 200 }}"
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [700, 620]
+    },
+
+    {
+      "parameters": {
+        "content": "## ⚙️ НАСТРОЙКА AVITO-TELEGRAM BRIDGE\n\n### 1. Получи ключи Avito API\n- Зайди на https://developers.avito.ru/\n- Создай приложение → получи client_id и client_secret\n- Запроси scopes: messenger:read, messenger:write, items:info\n- Найди свой user_id в настройках\n\n### 2. Заполни конфигурацию\n- Открой ноду \"Fetch Avito Messages\" → замени ВСТАВЬ_CLIENT_ID и т.д.\n- Открой ноду \"Process Reply & Send to Avito\" → замени те же данные\n- TG_BOT_TOKEN — токен твоего Telegram бота\n\n### 3. Подключи кнопки к Main Gateway\nВ Main Gateway добавь обработку callback_data начинающихся с \"avito:\"\nКогда получаешь callback_query с data = \"avito:approve:CHAT_ID\":\n→ POST на /webhook/avito-reply с телом:\n{\n  \"action\": \"approve\",\n  \"chat_id\": \"CHAT_ID\",\n  \"callback_query_id\": \"...\",\n  \"tg_message_id\": \"...\",\n  \"tg_chat_id\": \"...\"\n}\n\n### 4. Активируй workflow\n- Включи → будет опрашивать Avito каждые 2 минуты\n- Webhook URL для ответов: /webhook/avito-reply",
+        "width": 520,
+        "height": 580
+      },
+      "id": "sticky-setup",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1700, 80]
+    },
+    {
+      "parameters": {
+        "content": "## 🔗 ДОБАВЬ В MAIN GATEWAY\n\nВ ноде обработки callback_query добавь:\n\n```\nconst data = callback_query.data;\nif (data.startsWith('avito:')) {\n  const parts = data.split(':');\n  // avito:approve:CHAT_ID или avito:custom:CHAT_ID\n  const action = parts[1];\n  const chatId = parts[2];\n  \n  await $helpers.httpRequest({\n    method: 'POST',\n    url: 'https://jabuka.app.n8n.cloud/webhook/avito-reply',\n    headers: {'Content-Type': 'application/json'},\n    body: JSON.stringify({\n      action: action,\n      chat_id: chatId,\n      callback_query_id: callback_query.id,\n      tg_message_id: callback_query.message.message_id,\n      tg_chat_id: callback_query.message.chat.id\n    })\n  });\n  return; // Обработано\n}\n```\n\nДля action='custom' — запроси текст у пользователя\nчерез ForceReply, затем POST на /avito-reply\nс action='send_custom' + text",
+        "width": 460,
+        "height": 520
+      },
+      "id": "sticky-gateway",
+      "name": "Sticky Note1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1700, 700]
+    },
+    {
+      "parameters": {},
+      "id": "noop-end",
+      "name": "No New Messages",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [880, 400]
+    }
+  ],
+  "connections": {
+    "Poll Every 2 min": {
+      "main": [
+        [
+          { "node": "Fetch Avito Messages", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch Avito Messages": {
+      "main": [
+        [
+          { "node": "Has New Messages?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Has New Messages?": {
+      "main": [
+        [
+          { "node": "Build AI Prompt", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "No New Messages", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build AI Prompt": {
+      "main": [
+        [
+          { "node": "Claude AI Draft", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Claude AI Draft": {
+      "main": [
+        [
+          { "node": "Format TG Message", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format TG Message": {
+      "main": [
+        [
+          { "node": "Send to Telegram", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Avito Reply Webhook": {
+      "main": [
+        [
+          { "node": "Process Reply & Send to Avito", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Process Reply & Send to Avito": {
+      "main": [
+        [
+          { "node": "Webhook Response", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    { "name": "avito" },
+    { "name": "telegram" },
+    { "name": "bridge" }
+  ]
+}
