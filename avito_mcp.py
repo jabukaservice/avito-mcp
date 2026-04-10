@@ -401,7 +401,7 @@ async def avito_accounts() -> str:
     Account names are used in the `account` parameter of other tools.
 
     Returns:
-        JSON with list of accounts
+        JSON with accounts list. Each account has 'account' (name), 'user_id', 'is_default' fields.
     """
     result = []
     for name in ACCOUNT_NAMES:
@@ -466,7 +466,7 @@ async def avito_chats(params: ChatsInput) -> str:
         params: ChatsInput with optional filters (unread_only, item_ids, limit, offset, account)
 
     Returns:
-        JSON with chats array, each containing: account, id, buyer info, item info, last message, unread count
+        JSON list of chats with chat_id, user_id, item info, last_message, updated_at.
     """
     try:
         qp: Dict[str, Any] = {"limit": params.limit, "offset": params.offset}
@@ -564,7 +564,7 @@ async def avito_chat_messages(params: ChatMessagesInput) -> str:
         params: ChatMessagesInput with chat_id, optional pagination and account
 
     Returns:
-        JSON with messages array and metadata
+        JSON list of messages with id, author_id, text, created_at, type fields.
     """
     try:
         # If account specified, use it directly; otherwise try all accounts
@@ -765,7 +765,7 @@ async def avito_items(params: ItemsInput) -> str:
         params: ItemsInput with optional status filter, pagination, and account
 
     Returns:
-        JSON with items array and total count
+        JSON list of items with id, title, price, status, url fields.
     """
     try:
         qp: Dict[str, Any] = {
@@ -847,7 +847,7 @@ async def avito_item_info(params: ItemInfoInput) -> str:
         params: ItemInfoInput with item_id and optional account
 
     Returns:
-        JSON with full item details
+        JSON with full item details including id, title, price, description, status, stats.
     """
     try:
         accounts_to_try = _all_accounts(params.account) if not params.account else [_resolve_account(params.account)]
@@ -902,7 +902,7 @@ async def avito_profile(params: ProfileInput) -> str:
         params: ProfileInput with optional account
 
     Returns:
-        JSON with profile data for each account
+        JSON with user profile: id, name, phone, email, location.
     """
     try:
         profiles = []
